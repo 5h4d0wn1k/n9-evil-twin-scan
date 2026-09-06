@@ -32,41 +32,50 @@ sudo apt install iw wireless-tools
 ## Usage
 
 ```bash
-# Basic scan
-python3 evil_twin_scan.py --interface wlan0
+# Offline 802.11 beacon-fixture harness (default, no privileges):
+# parses genuine beacon bytes and flags duplicate SSIDs from different BSSIDs
+python3 evil_twin_scan.py --harness
 
-# Enable monitor mode before scanning
-sudo python3 evil_twin_scan.py --interface wlan0 --monitor
+# Live scan on a real lab wireless interface (needs a monitor-capable NIC)
+sudo python3 evil_twin_scan.py --interface lab-wlan0 --live
+
+# Enable monitor mode before a live scan
+sudo python3 evil_twin_scan.py --interface lab-wlan0 --live --monitor
 ```
 
-## Example Output
+The default (`--harness`) runs a fully unprivileged offline harness: it
+hand-constructs genuine 802.11 beacon frames (two BSSIDs sharing one SSID,
+plus a distinct single-BSSID AP), parses them through the real pure-Python
+beacon parser, and asserts the duplicate-SSID twin is flagged high-risk while
+the single-BSSID AP is not. Live scanning is gated behind `--live`.
 
-```
-╔═══════════════════════════════════════╗
-║     N9 — Evil Twin Scanner            ║
-╚═══════════════════════════════════════╝
-Interface: wlan0
+## Live Lab Test Plan
 
-=======================================================
-  SSID                     BSSID               CH   SIG
-=======================================================
-  HomeNetwork              AA:BB:CC:DD:EE:01    6   -42
-  HomeNetwork              AA:BB:CC:DD:EE:02    6   -45
-  CoffeeShop              11:22:33:44:55:01    1   -55
+> Authorized own-lab use only. Use documented placeholders (00:11:22:33:44:55).
 
-[!] POTENTIAL EVIL TWINS DETECTED: 1
+1. In a controlled lab, stand up **two access points broadcasting the same**
+   SSID (e.g. `lab-public-wifi`) from different BSSIDs on the same channel.
+2. Give monitor mode a try on the lab NIC, then run
+   `sudo python3 evil_twin_scan.py --interface lab-wlan0 --live --monitor`.
+3. Confirm both APs appear and the duplicate SSID is flagged as
+   `POTENTIAL EVIL TWIN` / `HIGH` risk.
+4. Bring down one AP and re-scan: the twin report should clear (single BSSID).
+5. Confirm a distinct SSID served by one AP is never reported as a twin.
 
-  SSID: HomeNetwork (Risk: HIGH)
-  APs with same SSID: 2
-  Indicators:
-    - 2 different BSSIDs
-    - same channel (possible clone)
-    - multiple strong signals (co-located?)
+## Metrics
 
-[*] Total APs scanned: 3
-```
+Deterministic, unprivileged, offline fixture harness:
 
-## Legal Disclaimer
+- `python3 -m unittest discover -s tests` — 9 unit tests (exit 0)
+- Beacon parser: BSSID, SSID, channel extracted from real wire-format bytes
+- Non-beacon and truncated frames rejected
+- Duplicate SSID across two BSSIDs -> flagged HIGH risk
+- Single-BSSID SSID -> not flagged (no false positive)
+- Harness exit code: `0` on success, `1` on failure
+
+## License
+
+MIT
 
 **IMPORTANT: Read before use.**
 

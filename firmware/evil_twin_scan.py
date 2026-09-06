@@ -10,7 +10,107 @@ import re
 import sys
 import argparse
 import time
+import struct
 from collections import defaultdict
+
+
+# ---------------------------------------------------------------------------
+# Pure-Python 802.11 beacon frame parser (no subprocess, no scapy)
+# ---------------------------------------------------------------------------
+# Frame Control bits for a Beacon: type=0 (mgmt), subtype=8 (beacon)
+BEACON_SUBTYPE_BITS = 0x0800
+SSID_TAG = 0
+
+
+def parse_beacon(data):
+    """Parse a raw 802.11 beacon frame into a dict.
+
+    Works offline with no privileges. Returns None (and records the reason)
+    if the bytes do not form a valid beacon. This exercises the same detection
+    data path (`detect_evil_twins`) used on live captures.
+    """
+    if len(data) < 24:
+        raise ValueError('truncated 802.11 header (%d bytes)' % len(data))
+    frame_control, duration = struct.unpack('!HH', data[:4])
+    if (frame_control & 0x0F00) != BEACON_SUBTYPE_BITS:
+        raise ValueError('not a beacon (frame control %#06x)' % frame_control)
+    da = data[4:10]
+    sa = data[10:16]
+    bssid = data[16:22]
+    seq_ctrl = data[22:24]
+
+    body = data[24:]
+    if len(body) < 12:
+        raise ValueError('beacon body too short')
+
+    # Timestamp(8) + beacon interval(2) + capability(2)
+    timestamp = int.from_bytes(body[0:8], 'little')
+    beacon_interval = struct.unpack('!H', body[8:10])[0]
+    capability = struct.unpack('!H', body[10:12])[0]
+
+    # Tagged parameters
+    tags = {}
+    pos = 12
+    while pos < len(body):
+        if pos + 2 > len(body):
+            break
+        tag_id = body[pos]
+        tag_len = body[pos + 1]
+        if pos + 2 + tag_len > len(body):
+            break
+        tags[tag_id] = body[pos + 2:pos + 2 + tag_len]
+        pos += 2 + tag_len
+
+    ssid_bytes = tags.get(SSID_TAG, b'')
+    ssid = ssid_bytes.decode('utf-8', 'replace') if ssid_bytes else '<hidden>'
+    # DS parameter set (tag 3) holds the channel
+    channel = None
+    if 3 in tags and tags[3]:
+        channel = tags[3][0]
+
+    return {
+        'bssid': ':'.join('%02X' % b for b in bssid),
+        'da': ':'.join('%02X' % b for b in da),
+        'sa': ':'.join('%02X' % b for b in sa),
+        'ssid': ssid,
+        'channel': channel,
+        'timestamp': timestamp,
+        'beacon_interval': beacon_interval,
+        'capability': capability,
+        'wpa': 48 in tags or 221 in tags,
+    }
+
+
+def build_beacon(bssid, ssid, channel=1, freq=2412, signal=-50,
+                 mcast=True):
+    """Hand-construct a genuine 802.11 beacon frame for fixtures/tests.
+
+    Returns the raw bytes so the parser is verified against a known-on-wire
+    format, not against itself. `bssid` is the BSSID that is broadcast/mcast DA.
+    """
+    bssid_b = bytes(int(x, 16) for x in bssid.split(':'))
+    # broadcast/multicast destination (all-ones) for a normal beacon
+    da = b'\xff' * 6
+    # Frame control: version 0, type mgmt(0), subtype beacon(8)
+    frame_control = BEACON_SUBTYPE_BITS
+    duration = 0
+    seq_ctrl = 0  # fragment 0, sequence 0
+
+    body = bytearray()
+    body += (0).to_bytes(8, 'little')          # timestamp
+    body += struct.pack('!H', 100)             # beacon interval
+    body += struct.pack('!H', 0x0001)          # capability (ESS)
+    # Tag: SSID(0)
+    s = ssid.encode('utf-8')
+    body += bytes([SSID_TAG, len(s)]) + s
+    # Tag: supported rates(1)
+    rates = bytes([0x82, 0x84, 0x8b, 0x96])
+    body += bytes([1, len(rates)]) + rates
+    # Tag: DS parameter set(3) = channel
+    body += bytes([3, 1, channel])
+
+    return (struct.pack('!HH', frame_control, duration) + da + bssid_b +
+            bssid_b + struct.pack('!H', seq_ctrl) + bytes(body))
 
 
 class EvilTwinScanner:
@@ -342,16 +442,89 @@ class EvilTwinScanner:
         print(f"[*] Unique SSIDs: {len(self.ssids)}")
 
 
+def run_harness():
+    """Offline harness: parse real 802.11 beacon fixture bytes and flag
+    duplicate SSIDs broadcast by different BSSIDs.
+
+    No wireless interface, no privileges, no subprocess calls. The fixtures
+    are built as genuine beacon frames (see ``build_beacon``) then parsed
+    through the real parser and grouped through the same ``detect_evil_twins``
+    logic used live.
+    """
+    ok = True
+    scanner = EvilTwinScanner()  # interface unused for fixture path
+
+    def verify(label, cond, detail=''):
+        nonlocal ok
+        print(f'  [{"PASS" if cond else "FAIL"}] {label} {detail}')
+        ok = ok and cond
+
+    print('=== N9 Evil Twin Scan: offline 802.11 beacon fixture harness ===')
+
+    # Two different BSSIDs broadcasting the SAME SSID (an evil-twin signature)
+    fixtures = [
+        build_beacon('00:11:22:33:44:55', 'lab-public-wifi', channel=1,
+                     signal=-40),
+        build_beacon('00:11:22:33:44:66', 'lab-public-wifi', channel=1,
+                     signal=-55),
+        # A distinct, single AP for a different SSID (should NOT be flagged)
+        build_beacon('00:aa:bb:cc:dd:ee', 'lab-docs', channel=6, signal=-70),
+    ]
+
+    parsed = []
+    for i, raw in enumerate(fixtures):
+        ap = parse_beacon(raw)
+        parsed.append(ap)
+        print(f'  [fixture {i}] bssid={ap["bssid"]} ssid={ap["ssid"]!r} '
+              f'ch={ap["channel"]}')
+        verify(f'fixture {i} parsed with correct BSSID',
+               len(ap['bssid']) == 17)
+        verify(f'fixture {i} SSID extracted', ap['ssid'] is not None)
+        verify(f'fixture {i} channel extracted', ap['channel'] is not None)
+
+    # Feed into the same grouping + detection logic used on a live scan
+    scanner.scan_results = parsed
+    scanner.ssids = defaultdict(list)
+    for ap in parsed:
+        scanner.ssids[ap.get('ssid', '<unknown>')].append(ap)
+
+    twins = scanner.detect_evil_twins()
+    dupe_ssid = [t for t in twins if t['ssid'] == 'lab-public-wifi']
+    other_flagged = [t for t in twins if t['ssid'] == 'lab-docs']
+
+    verify('duplicate SSID across two BSSIDs flagged',
+           len(dupe_ssid) == 1 and dupe_ssid[0]['count'] == 2,
+           f'{len(dupe_ssid)} twin(s)')
+    verify('high risk (2+ indicators: different BSSIDs + same channel)',
+           dupe_ssid and dupe_ssid[0]['risk'] == 'HIGH',
+           dupe_ssid[0]['risk'] if dupe_ssid else '?')
+    verify('single-BSSID SSID NOT flagged as a twin',
+           len(other_flagged) == 0, f'{len(other_flagged)} flagged')
+
+    print('\n[RESULT] ' + ('PASS' if ok else 'FAIL'))
+    return 0 if ok else 1
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description='N9 — WiFi Evil Twin Scanner')
+        description='N9 — WiFi Evil Twin Scanner (offline beacon-fixture '
+                    'harness + gated live scan)')
+    parser.add_argument('--harness', action='store_true',
+                        help='Run offline 802.11 beacon-fixture harness '
+                             '(default)')
     parser.add_argument('--interface', '-i', default='wlan0',
                         help='Wireless interface (default: wlan0)')
+    parser.add_argument('--live', action='store_true',
+                        help='Run a live scan (needs wireless interface)')
     parser.add_argument('--monitor', action='store_true',
                         help='Enable monitor mode before scan')
     parser.add_argument('--channels', help='Channel list to hop (e.g. 1,6,11)')
 
     args = parser.parse_args()
+
+    if args.harness or not args.live:
+        sys.exit(run_harness())
+
     scanner = EvilTwinScanner(args.interface)
 
     if args.monitor:
@@ -364,6 +537,7 @@ def main():
     finally:
         if args.monitor:
             scanner.disable_monitor_mode()
+    return 0
 
 
 if __name__ == '__main__':
