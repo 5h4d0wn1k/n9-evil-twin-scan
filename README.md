@@ -3,121 +3,92 @@
 > or hold explicit written authorization to assess**. Unauthorized use is
 > prohibited and may be illegal. Read [ETHICS.md](ETHICS.md) and
 > [SCOPE.md](SCOPE.md) before use. Use at your own risk; **AS IS**, no warranty.
-# N9 — WiFi Evil Twin Scanner
 
-Scan for rogue access points, detect duplicate SSIDs, and analyze signal patterns.
+# N9 — Wi-Fi Evil Twin / Rogue AP Scanner
 
-## Overview
+Duplicate-SSID and rogue-access-point scanner that detects cloned SSIDs and
+anomalous beacons for **Wi-Fi security** monitoring and **wireless
+penetration-testing** labs.
 
-This project is a Python companion for WiFi evil twin detection that:
-- Scans nearby APs using iwlist or iw commands
-- Detects potential evil twin APs via duplicate SSID analysis
-- Identifies suspicious signal patterns (same channel, mixed encryption)
-- Reports risk levels based on multiple indicators
-- Supports monitor mode toggling
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/5h4d0wn1k/n9-evil-twin-scan)](https://github.com/5h4d0wn1k/n9-evil-twin-scan)
+[![Issues](https://img.shields.io/github/issues/5h4d0wn1k/n9-evil-twin-scan)](https://github.com/5h4d0wn1k/n9-evil-twin-scan/issues)
+[![Last commit](https://img.shields.io/github/last-commit/5h4d0wn1k/n9-evil-twin-scan)](https://github.com/5h4d0wn1k/n9-evil-twin-scan)
+
+## Why
+
+Evil-twin attacks work because Wi-Fi clients trust an SSID, not the access
+point behind it: an attacker clones a legitimate network name onto their own
+radio and lures victims into credential harvesting or MITM. Detecting that
+requires identifying the same SSID broadcast by multiple BSSIDs, on the same
+channel, with inconsistent encryption — signal-level anomalies a normal scan
+misses. N9 is an offline-first scanner that hand-constructs genuine 802.11
+beacon frames, parses them through a pure-Python beacon parser, and flags the
+duplicate-SSID patterns that indicate an evil twin, while never raising false
+positives on single-BSSID networks. Live scanning is gated behind `--live` for
+authorized own-lab use with a monitor-capable NIC, keeping the tool inside the
+scope of wireless security education and authorized testing.
 
 ## Features
 
-- **Dual scan engine**: Uses both iw and iwlist for compatibility
-- **Evil twin detection**: Identifies SSIDs served by multiple BSSIDs
-- **Signal analysis**: Measures signal range and consistency
-- **Encryption comparison**: Detects mixed open/closed variants
-- **Channel analysis**: Flags same-channel duplicates
-- **Monitor mode**: Optional monitor mode management
+- **Dual scan engine** — uses both `iw` and `iwlist` for device compatibility
+- **Evil-twin detection** — flags SSIDs served by multiple BSSIDs (duplicate SSID)
+- **Signal analysis** — measures signal range and consistency across beacons
+- **Encryption comparison** — detects mixed open/closed variants of one SSID
+- **Channel analysis** — flags same-channel duplicate BSSIDs
+- **Monitor mode** — optional live monitor-mode management on a lab NIC
+- **Offline harness** — unprivileged `--harness` demo with no radio privileges
 
-## Installation
+## Quickstart
 
-No external dependencies — uses only the Python standard library + system tools (iw, iwlist).
+Python standard library + system wireless tools only — no third-party packages.
 
 ```bash
-# Ensure wireless tools are available
+# Install wireless tools (Linux)
 sudo apt install iw wireless-tools
+
+# Offline, unprivileged, deterministic harness (default): parses beacon bytes,
+# asserts the duplicate-SSID twin is HIGH risk and the single-BSSID AP is not.
+python3 firmware/evil_twin_scan.py --harness
+
+# Live scan on an authorized lab interface
+sudo python3 firmware/evil_twin_scan.py --interface lab-wlan0 --live
+
+# Live scan with monitor-mode toggle and channel hop list
+sudo python3 firmware/evil_twin_scan.py --interface lab-wlan0 --live --monitor --channels 1,6,11
+
+# Unit tests (9 cases)
+python3 -m unittest discover -s tests
 ```
 
-## Usage
+CLI options: `--harness`, `--interface/-i` (default `wlan0`), `--live`,
+`--monitor`, `--channels`.
 
-```bash
-# Offline 802.11 beacon-fixture harness (default, no privileges):
-# parses genuine beacon bytes and flags duplicate SSIDs from different BSSIDs
-python3 evil_twin_scan.py --harness
+## Live lab plan
 
-# Live scan on a real lab wireless interface (needs a monitor-capable NIC)
-sudo python3 evil_twin_scan.py --interface lab-wlan0 --live
+Stand up two access points broadcasting the same SSID (placeholders like
+`lab-public-wifi`) from different BSSIDs on the same channel, then run the live
+scan and confirm the duplicate SSID is reported as `POTENTIAL EVIL TWIN` /
+`HIGH`. Bring one AP down, re-scan, and confirm the report clears. Test only
+inside your own controlled lab.
 
-# Enable monitor mode before a live scan
-sudo python3 evil_twin_scan.py --interface lab-wlan0 --live --monitor
-```
+## Project structure
 
-The default (`--harness`) runs a fully unprivileged offline harness: it
-hand-constructs genuine 802.11 beacon frames (two BSSIDs sharing one SSID,
-plus a distinct single-BSSID AP), parses them through the real pure-Python
-beacon parser, and asserts the duplicate-SSID twin is flagged high-risk while
-the single-BSSID AP is not. Live scanning is gated behind `--live`.
+- `firmware/evil_twin_scan.py` — scanner CLI, beacon parser, risk engine
+- `tests/test_evil_twin_scan.py` — 9 unit tests
 
-## Live Lab Test Plan
+## Legal & authorized use
 
-> Authorized own-lab use only. Use documented placeholders (00:11:22:33:44:55).
+For **educational and authorized security testing purposes only**. The default
+harness is fully unprivileged and offline; live scanning must be limited to
+networks you own or hold written authorization to assess. See
+[ETHICS.md](ETHICS.md), [SCOPE.md](SCOPE.md), and [SECURITY.md](SECURITY.md)
+before use.
 
-1. In a controlled lab, stand up **two access points broadcasting the same**
-   SSID (e.g. `lab-public-wifi`) from different BSSIDs on the same channel.
-2. Give monitor mode a try on the lab NIC, then run
-   `sudo python3 evil_twin_scan.py --interface lab-wlan0 --live --monitor`.
-3. Confirm both APs appear and the duplicate SSID is flagged as
-   `POTENTIAL EVIL TWIN` / `HIGH` risk.
-4. Bring down one AP and re-scan: the twin report should clear (single BSSID).
-5. Confirm a distinct SSID served by one AP is never reported as a twin.
+## Contributing
 
-## Metrics
-
-Deterministic, unprivileged, offline fixture harness:
-
-- `python3 -m unittest discover -s tests` — 9 unit tests (exit 0)
-- Beacon parser: BSSID, SSID, channel extracted from real wire-format bytes
-- Non-beacon and truncated frames rejected
-- Duplicate SSID across two BSSIDs -> flagged HIGH risk
-- Single-BSSID SSID -> not flagged (no false positive)
-- Harness exit code: `0` on success, `1` on failure
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT
-
-**IMPORTANT: Read before use.**
-
-This project is provided for **educational and authorized security testing purposes only**.
-
-### Authorization Requirements
-- You MUST have explicit written permission from the network owner before using this tool
-- Unauthorized interception of network communications is illegal under federal and state laws
-- This tool should ONLY be used on networks you own or have written authorization to test
-
-### Legal Framework
-- **Computer Fraud and Abuse Act (CFAA)**: Unauthorized access to computer systems is a federal crime
-- **Wiretap Act (18 U.S.C. § 2511)**: Interception of electronic communications without consent is illegal
-- **State Laws**: Many states have additional computer crime and wiretapping statutes
-- **GDPR/CCPA**: Data collection may be subject to privacy regulations
-
-### Acceptable Use
-- Testing security of your own networks
-- Authorized penetration testing with written scope
-- Academic research in controlled lab environments
-- Security education and training
-
-### Prohibited Use
-- Intercepting communications on networks you do not own
-- Attacking infrastructure without authorization
-- Any activity that violates applicable laws or regulations
-- Commercial use without proper licensing
-
-### No Warranty
-This software is provided "AS IS" without warranty of any kind. The author is not responsible for any misuse or damage caused by this software.
-
-### Responsible Disclosure
-If you discover vulnerabilities using this tool, follow responsible disclosure practices:
-1. Report to the vendor/owner privately
-2. Allow reasonable time for remediation
-3. Do not exploit beyond proof of concept
-
-## License
-
-MIT
+MIT — see [LICENSE](LICENSE).
